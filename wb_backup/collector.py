@@ -11,7 +11,6 @@ from .config import MSK
 SOURCES = {
     "balance": "Финансовый баланс",
     "finance_daily": "Ежедневные отчёты реализации",
-    "finance_weekly": "Еженедельные отчёты реализации",
     "orders": "Заказы (оперативные данные)",
     "sales": "Продажи и возвраты (оперативные данные)",
     "wb_stocks": "Остатки на складах WB",
@@ -37,9 +36,12 @@ class Collector:
         self.config, self.store, self.job = config, store, job
         self.root = config.data / 'jobs' / str(job['id']) / 'archive'
         self.root.mkdir(parents=True, exist_ok=True)
-        self.end = datetime.fromisoformat(job['created']).date()
-        self.full = job['mode'] == 'full'
-        self.start = self.end - timedelta(days=config.lookback)
+        if job['mode'] != 'yesterday':
+            raise ValueError('Старая многодневная загрузка отключена; создайте новую загрузку за вчера')
+        created = datetime.fromisoformat(job['created'])
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=MSK)
+        self.start = self.end = created.astimezone(MSK).date() - timedelta(days=1)
         self.registry = []
 
     def table(self, wb, name, records, source, period='Текущее состояние'):
@@ -56,7 +58,7 @@ class Collector:
         return self.table(wb, name, records, host + path, period)
 
     def finance(self, wb, period):
-        start = self.config.finance_start if self.full else self.start
+        start = self.start
         errors = []
         for a, b in reversed(list(windows(start, self.end))):
             try:
@@ -69,18 +71,22 @@ class Collector:
             raise APIError('\n'.join(errors))
 
     def finance_window(self, wb, period, a, b):
+            if period != 'daily':
+                raise ValueError('Еженедельная выгрузка отключена в режиме одного дня')
+            # Explicit bounds include the whole calendar day, not today's changes.
+            bounds = {'dateFrom': a + 'T00:00:00', 'dateTo': b + 'T23:59:59.999'}
             offset = 0
             while True:
                 batch = self.request_table(wb, f'{period}_реестр_{a}_{offset}', 'finance', 'POST',
-                    '/api/finance/v1/sales-reports/list', body={'dateFrom': max(a, '2025-01-01'), 'dateTo': b,
-                    'period': period, 'limit': 1000, 'offset': offset}, period=f'{a} — {b}') if b >= '2025-01-01' else []
+                    '/api/finance/v1/sales-reports/list', body={**bounds,
+                    'period': period, 'limit': 1000, 'offset': offset}, period=f'{a} — {b}')
                 if len(batch) < 1000:
                     break
                 offset += len(batch)
             cursor = 0
             while True:
                 batch = self.request_table(wb, f'{period}_операции_{a}_{cursor}', 'finance', 'POST',
-                    '/api/finance/v1/sales-reports/detailed', body={'dateFrom': a, 'dateTo': b, 'period': period,
+                    '/api/finance/v1/sales-reports/detailed', body={**bounds, 'period': period,
                     'limit': 10000, 'rrdId': cursor}, period=f'{a} — {b}')
                 if not batch:
                     break
@@ -90,31 +96,13 @@ class Collector:
                 cursor = int(next_cursor)
 
     def statistics(self, wb, kind):
-        cursor = (self.config.other_start if self.full else self.start).isoformat()
-        seen = set()
-        page = 0
-        while True:
-            response = wb.request('statistics', 'GET', f'/api/v1/supplier/{kind}', params={'dateFrom': cursor, 'flag': 0})
-            batch = rows(response)
-            if not batch:
-                break
-            unique = []
-            for record in batch:
-                identity = hashlib.sha256(json.dumps(record, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-                if identity not in seen:
-                    unique.append(record)
-                    seen.add(identity)
-            self.table(wb, f'{kind}_{page:05d}', unique, f'statistics/{kind}',
-                       f'Изменения с {cursor}; оперативные данные, не итоговый финансовый отчёт')
-            next_cursor = batch[-1].get('lastChangeDate')
-            if not next_cursor:
-                raise APIError('Нет lastChangeDate; полнота не подтверждена')
-            if next_cursor <= cursor:
-                # Boundary duplicates are allowed only for a terminal, sub-limit page.
-                if len(batch) >= 80000 or unique:
-                    raise APIError('Пагинация заказов/продаж не продвигается')
-                break
-            cursor, page = next_cursor, page + 1
+        # flag=1 returns all operations for precisely this date. flag=0 would
+        # also fetch today's updates and modifications to older operations.
+        day = self.start.isoformat()
+        response = wb.request('statistics', 'GET', f'/api/v1/supplier/{kind}',
+                              params={'dateFrom': day, 'flag': 1})
+        self.table(wb, f'{kind}_{day}', rows(response), f'statistics/{kind}',
+                   f'{day}; оперативные данные, не итоговый финансовый отчёт')
 
     def stocks(self, wb):
         offset = 0
@@ -182,11 +170,10 @@ class Collector:
         offset = 0
         while True:
             params = {'locale': 'ru', 'limit': 50, 'offset': offset}
-            if not self.full:
-                params.update(beginTime=self.start.isoformat(), endTime=self.end.isoformat())
+            params.update(beginTime=self.start.isoformat(), endTime=self.end.isoformat())
             batch = self.request_table(wb, f'документы_реестр_{offset}', 'documents', 'GET',
                 '/api/v1/documents/list', params=params, unwrap=('data', 'documents'),
-                period='Все доступные документы' if self.full else f'{self.start} — {self.end}')
+                period=f'{self.start} — {self.end}')
             for record in batch:
                 if not record.get('extensions') or not record.get('serviceName'):
                     raise APIError('В документе нет форматов или ID')
@@ -209,11 +196,11 @@ class Collector:
             offset += len(batch)
 
     def acquiring(self, wb):
-        for a, b in windows(max(self.config.finance_start, date(2025, 1, 1)) if self.full else self.start, self.end):
+        for a, b in windows(self.start, self.end):
             cursor = 0
             while True:
                 batch = self.request_table(wb, f'эквайринг_{a}_{cursor}', 'finance', 'POST',
-                    '/api/finance/v1/acquiring/detailed', body={'dateFrom': a, 'dateTo': b, 'limit': 10000, 'rrdId': cursor},
+                    '/api/finance/v1/acquiring/detailed', body={'dateFrom': a + 'T00:00:00', 'dateTo': b + 'T23:59:59.999', 'limit': 10000, 'rrdId': cursor},
                     period=f'{a} — {b}')
                 if not batch:
                     break
@@ -224,7 +211,7 @@ class Collector:
 
     def generated(self, wb, kind, days):
         import time
-        start = self.config.other_start if self.full else self.start
+        start = self.start
         errors = []
         for a, b in reversed(list(windows(start, self.end, days))):
             try:
@@ -302,7 +289,7 @@ class Collector:
                 'wb_stocks': lambda: self.stocks(wb),
                 'cards': lambda: self.cards(wb), 'fbs_stocks': lambda: self.fbs(wb),
                 'orders': lambda: self.statistics(wb, 'orders'), 'sales': lambda: self.statistics(wb, 'sales'),
-                'finance_daily': lambda: self.finance(wb, 'daily'), 'finance_weekly': lambda: self.finance(wb, 'weekly'),
+                'finance_daily': lambda: self.finance(wb, 'daily'),
                 'prices': lambda: self.prices(wb), 'documents': lambda: self.documents(wb),
                 'acquiring': lambda: self.acquiring(wb),
                 'paid_storage': lambda: self.generated(wb, 'paid_storage', 8),
@@ -330,14 +317,12 @@ class Collector:
                 wb.client.close()
         metadata = {'job': self.job['id'], 'mode': self.job['mode'], 'created': self.job['created'],
                     'finished': stamp(), 'status': 'incomplete' if failures else 'complete',
-                    'requested_end': self.end.isoformat(), 'daily_lookback_days': self.config.lookback,
-                    'finance_history_start': self.config.finance_start.isoformat(),
-                    'other_history_start': self.config.other_start.isoformat(),
-                    'limits': 'Полная выгрузка охватывает перечисленные источники и данные, доступные WB API. '
+                    'requested_start': self.start.isoformat(), 'requested_end': self.end.isoformat(),
+                    'limits': 'Отчёты и документы запрашиваются только за прошедший календарный день по Москве. '
                               'Баланс, цены, карточки и текущие остатки — снимки. '
-                              'Заказы/продажи — предварительные данные; гарантированная история ограничена WB. '
-                              'Ежедневные и еженедельные операции не складывать вместе. '
-                              'История остатков CSV, реклама и сборочные задания не подключены в этой версии.',
+                              'Заказы/продажи — предварительные данные. WB может публиковать данные с задержкой; '
+                              'более ранние дни автоматически не перепроверяются. '
+                              'Еженедельные отчёты, история остатков CSV, реклама и сборочные задания отключены.',
                     'sources': self.registry}
         atomic_json(self.root / 'РЕЕСТР.json', metadata)
         write_table(self.root / 'РЕЕСТР.xlsx', self.registry, {'Загрузка': self.job['id'], 'Режим': self.job['mode'],

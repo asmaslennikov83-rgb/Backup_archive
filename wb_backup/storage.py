@@ -32,7 +32,13 @@ class Store:
         CREATE TABLE IF NOT EXISTS sent(job INTEGER, chat INTEGER, file TEXT,
             PRIMARY KEY(job, chat, file));
         """)
-        self.db.execute("UPDATE jobs SET status='queued' WHERE status='running'")
+        # Old jobs may span years or a 30-day window. Preserve their archives,
+        # but never resume them under the new one-day policy.
+        cancelled = self.db.execute("UPDATE jobs SET status='cancelled', progress='Остановлено: включена загрузка только за вчера' "
+                                    "WHERE mode!='yesterday' AND status IN ('queued','running','incomplete','failed')").rowcount
+        if cancelled:
+            self.db.execute("DELETE FROM kv WHERE key='last_scheduled_date'")
+        self.db.execute("UPDATE jobs SET status='queued' WHERE status='running' AND mode='yesterday'")
         self.db.commit()
 
     def get(self, key, default=None):
@@ -45,6 +51,8 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
 
     def enqueue(self, mode, recipients):
+        if mode != 'yesterday':
+            raise ValueError('Разрешена только загрузка за прошедший день')
         with self.lock, self.db:
             active = self.db.execute("SELECT id FROM jobs WHERE status IN ('queued','running') ORDER BY id LIMIT 1").fetchone()
             if active:

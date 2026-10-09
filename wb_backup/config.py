@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import time
 import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,9 +23,6 @@ class Config:
     accounts: tuple[Account, ...]
     data: Path
     schedule: time
-    lookback: int
-    finance_start: date
-    other_start: date
     part_bytes: int
 
     @classmethod
@@ -44,11 +41,8 @@ class Config:
             raise ValueError("Настройте токен Telegram и положительные ID пользователей; получатели должны входить в белый список")
         if any(not a.token for a in accounts):
             raise ValueError("Нужны токены обоих кабинетов WB")
-        lookback = int(os.getenv("DAILY_LOOKBACK_DAYS", "30"))
         size = int(os.getenv("ARCHIVE_PART_MB", "45"))
-        if not 1 <= lookback <= 90 or not 1 <= size <= 45:
-            raise ValueError("DAILY_LOOKBACK_DAYS: 1–90; ARCHIVE_PART_MB: 1–45")
+        if not 1 <= size <= 45:
+            raise ValueError("ARCHIVE_PART_MB: 1–45")
         return cls(token, allowed, recipients, accounts, Path(os.getenv("DATA_DIR", "data")).resolve(),
-                   time.fromisoformat(os.getenv("SCHEDULE_TIME", "10:00")), lookback,
-                   date.fromisoformat(os.getenv("FINANCE_HISTORY_START", "2024-01-29")),
-                   date.fromisoformat(os.getenv("OTHER_HISTORY_START", "2019-01-01")), size * 1024 * 1024)
+                   time.fromisoformat(os.getenv("SCHEDULE_TIME", "10:00")), size * 1024 * 1024)

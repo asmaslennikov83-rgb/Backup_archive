@@ -47,7 +47,7 @@ class Bot:
                 self.stop.wait(2)
                 continue
             recipients = set(json.loads(job['recipients'])) & self.config.allowed
-            self.notify(recipients, f'Загрузка №{job["id"]} началась. Полная история может занимать часы из-за лимитов WB. '
+            self.notify(recipients, f'Загрузка №{job["id"]} за прошедший день началась. '
                                    'Прогресс доступен по кнопке «Статус».')
             try:
                 files, failures = Collector(self.config, self.store, job).run()
@@ -86,25 +86,27 @@ class Bot:
             self.telegram.message(user, HELP_TEXT, True)
         elif command in ('/connected', 'Что подключено'):
             self.telegram.message(user, CONNECTED_TEXT, True)
-        elif command in ('/all', 'Скачать всё', '/daily', 'Скачать свежие данные'):
-            mode = 'full' if command in ('/all', 'Скачать всё') else 'daily'
-            job, created = self.store.enqueue(mode, {user})
+        elif command in ('/all', 'Скачать всё'):
+            self.telegram.message(user, 'Полная история отключена. Используйте «Скачать за вчера».', True)
+        elif command in ('/daily', 'Скачать за вчера', 'Скачать свежие данные'):
+            job, created = self.store.enqueue('yesterday', {user})
             self.telegram.message(user, f'Загрузка №{job} ' + ('добавлена в очередь.' if created else
                 'уже выполняется. Дождитесь завершения; затем повторите команду для собственного архива.'))
         elif command in ('/status', 'Статус'):
             job = self.store.latest()
             states = {'queued': 'В очереди', 'running': 'Загрузка', 'complete': 'Готово',
-                      'incomplete': 'Есть ошибки', 'failed': 'Остановлено из-за ошибки'}
+                      'incomplete': 'Есть ошибки', 'failed': 'Остановлено из-за ошибки',
+                      'cancelled': 'Отменено: включена загрузка за вчера'}
             self.telegram.message(user, 'Загрузок ещё нет.' if not job else
-                f'Загрузка №{job["id"]}\nРежим: {"Вся история" if job["mode"] == "full" else "Свежие данные"}\n'
+                f'Загрузка №{job["id"]}\nРежим: {"За прошедший день" if job["mode"] == "yesterday" else "Старая загрузка"}\n'
                 f'Статус: {states.get(job["status"], job["status"])}\nНачало: {job["created"]}\n'
                 f'{job["progress"]}\n{job["error"]}')
         elif command in ('/retry', 'Продолжить загрузку'):
             job = self.store.latest()
-            if not job or job['status'] not in ('incomplete', 'failed'):
+            if not job or job['mode'] != 'yesterday' or job['status'] not in ('incomplete', 'failed'):
                 self.telegram.message(user, 'Нет остановленной или неполной загрузки для продолжения.')
             elif user not in json.loads(job['recipients']):
-                self.telegram.message(user, 'Повторить доставку может получатель этой загрузки. Для нового архива: /all.')
+                self.telegram.message(user, 'Повторить доставку может получатель этой загрузки. Для нового архива: /daily.')
             else:
                 self.store.update(job['id'], status='queued')
                 self.telegram.message(user, f'Загрузка №{job["id"]} будет продолжена.')
@@ -126,7 +128,7 @@ class Bot:
         while not self.stop.is_set():
             now = datetime.now(MSK)
             if schedule_due(now, self.config.schedule, self.store.get('last_scheduled_date')):
-                _, created = self.store.enqueue('daily', self.config.recipients)
+                _, created = self.store.enqueue('yesterday', self.config.recipients)
                 if created:
                     self.store.set('last_scheduled_date', now.date().isoformat())
             try:
