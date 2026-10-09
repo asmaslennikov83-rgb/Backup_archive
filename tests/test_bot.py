@@ -3,6 +3,13 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+import sys
+
+# Support hosts/developers invoking this file directly instead of unittest discovery.
+# This remains a test runner; production must launch main.py or -m wb_backup.
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from datetime import date, datetime, time
 from unittest.mock import patch, Mock
 import httpx
