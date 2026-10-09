@@ -5,9 +5,10 @@ import threading
 from datetime import datetime
 from .config import Config, MSK
 from .storage import Store
-from .collector import Collector, SOURCES
+from .collector import Collector
 from .telegram import Telegram, TelegramError
 from .lock import InstanceLock
+from .menu import welcome, CONNECTED_TEXT, HELP_TEXT
 
 log = logging.getLogger('wb_backup')
 
@@ -30,12 +31,12 @@ class Bot:
         self.stop = threading.Event()
         self.telegram = Telegram(config.telegram_token)
 
-    def notify(self, recipients, text):
+    def notify(self, recipients, text, keyboard=False):
         for user in recipients:
             if user not in self.config.allowed:
                 continue
             try:
-                self.telegram.message(user, text)
+                self.telegram.message(user, text, keyboard)
             except TelegramError:
                 log.warning('Не удалось отправить сообщение получателю %s', user)
 
@@ -79,11 +80,12 @@ class Bot:
             return
         user = message['from']['id']
         command = message.get('text', '').strip()
-        if command in ('/start', '/help'):
-            self.telegram.message(user, 'Архив Wildberries: оба кабинета, ежедневно в ' + self.config.schedule.strftime('%H:%M') +
-                ' по Москве.\n«Скачать всё» — все подключённые источники за доступную историю API. '
-                'Баланс и текущие остатки — снимки.\nИсточники:\n' + '\n'.join(SOURCES.values()) +
-                '\n/retry — продолжить последнюю неполную загрузку.\nНажатие кнопки во время работы не создаёт повторное задание.', True)
+        if command == '/start':
+            self.telegram.message(user, welcome(self.config), True)
+        elif command in ('/help', 'Помощь'):
+            self.telegram.message(user, HELP_TEXT, True)
+        elif command in ('/connected', 'Что подключено'):
+            self.telegram.message(user, CONNECTED_TEXT, True)
         elif command in ('/all', 'Скачать всё', '/daily', 'Скачать свежие данные'):
             mode = 'full' if command in ('/all', 'Скачать всё') else 'daily'
             job, created = self.store.enqueue(mode, {user})
@@ -97,7 +99,7 @@ class Bot:
                 f'Загрузка №{job["id"]}\nРежим: {"Вся история" if job["mode"] == "full" else "Свежие данные"}\n'
                 f'Статус: {states.get(job["status"], job["status"])}\nНачало: {job["created"]}\n'
                 f'{job["progress"]}\n{job["error"]}')
-        elif command == '/retry':
+        elif command in ('/retry', 'Продолжить загрузку'):
             job = self.store.latest()
             if not job or job['status'] not in ('incomplete', 'failed'):
                 self.telegram.message(user, 'Нет остановленной или неполной загрузки для продолжения.')
@@ -114,6 +116,11 @@ class Bot:
         info = self.telegram.call('getWebhookInfo', {})
         if info.get('url'):
             raise ValueError('У бота настроен webhook. Используйте отдельного бота или отключите webhook перед запуском.')
+        try:
+            self.telegram.register_commands()
+        except TelegramError:
+            log.warning('Не удалось обновить меню команд Telegram; кнопки и команды в чате доступны')
+        self.notify(self.config.recipients, welcome(self.config, restarted=True), keyboard=True)
         threading.Thread(target=self.worker, daemon=True).start()
         offset = self.store.get('telegram_offset', 0)
         while not self.stop.is_set():

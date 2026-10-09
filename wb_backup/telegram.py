@@ -1,5 +1,6 @@
 import time
 import httpx
+from .menu import KEYBOARD, COMMANDS
 
 
 class TelegramError(Exception):
@@ -40,10 +41,13 @@ class Telegram:
         import json
         data = {'chat_id': chat, 'text': text[:4000]}
         if keyboard:
-            data['reply_markup'] = json.dumps({'keyboard': [[{'text': 'Скачать всё'}],
-                                              [{'text': 'Скачать свежие данные'}, {'text': 'Статус'}]],
-                                              'resize_keyboard': True}, ensure_ascii=False)
+            data['reply_markup'] = json.dumps(KEYBOARD, ensure_ascii=False)
         return self.call('sendMessage', data)
+
+    def register_commands(self):
+        import json
+        # Command names are public; each actual operation still checks the whitelist.
+        self.call('setMyCommands', {'commands': json.dumps(COMMANDS, ensure_ascii=False)})
 
     def document(self, chat, path, caption):
         with path.open('rb') as stream:
