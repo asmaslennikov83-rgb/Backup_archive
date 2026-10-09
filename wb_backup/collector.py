@@ -14,13 +14,9 @@ SOURCES = {
     "orders": "Заказы (оперативные данные)",
     "sales": "Продажи и возвраты (оперативные данные)",
     "wb_stocks": "Остатки на складах WB",
-    "cards": "Карточки товаров",
     "fbs_stocks": "Остатки на складах продавца",
     "prices": "Цены и скидки",
     "documents": "Документы продавца",
-    "acquiring": "Издержки на приём платежей",
-    "paid_storage": "Платное хранение",
-    "acceptance": "Операции при приёмке",
 }
 
 
@@ -115,6 +111,7 @@ class Collector:
             offset += len(batch)
 
     def cards(self, wb):
+        """Internal dependency for FBS size IDs; never export product cards."""
         cards = []
         # Include cards in trash: FBS stocks may still exist for them.
         for trash in (False, True):
@@ -127,7 +124,6 @@ class Collector:
                     settings['filter'] = {'withPhoto': -1}
                 value = wb.request('content', 'POST', path, body={'settings': settings})
                 batch = rows(value, 'cards')
-                self.table(wb, f'карточки_{"корзина" if trash else "активные"}_{page}', batch, path)
                 cards.extend(batch)
                 if len(batch) < 100:
                     break
@@ -142,7 +138,14 @@ class Collector:
         return cards
 
     def fbs(self, wb):
-        cards = self.cards(wb)
+        # Keep full card responses outside the delivery archive. Share the
+        # account's limiter so internal discovery cannot bypass rate limits.
+        internal = WB(self.account, self.root.parent / 'internal' / self.account.key / 'cards')
+        internal.last = wb.last
+        try:
+            cards = self.cards(internal)
+        finally:
+            internal.client.close()
         ids = sorted({int(size['chrtID']) for card in cards for size in card.get('sizes', []) if 'chrtID' in size})
         warehouses = self.request_table(wb, 'склады_продавца', 'marketplace', 'GET', '/api/v3/warehouses')
         if cards and not ids:
@@ -287,13 +290,10 @@ class Collector:
             operations = {
                 'balance': lambda: self.balance(wb),
                 'wb_stocks': lambda: self.stocks(wb),
-                'cards': lambda: self.cards(wb), 'fbs_stocks': lambda: self.fbs(wb),
+                'fbs_stocks': lambda: self.fbs(wb),
                 'orders': lambda: self.statistics(wb, 'orders'), 'sales': lambda: self.statistics(wb, 'sales'),
                 'finance_daily': lambda: self.finance(wb, 'daily'),
                 'prices': lambda: self.prices(wb), 'documents': lambda: self.documents(wb),
-                'acquiring': lambda: self.acquiring(wb),
-                'paid_storage': lambda: self.generated(wb, 'paid_storage', 8),
-                'acceptance': lambda: self.generated(wb, 'acceptance_report', 31),
             }
             try:
                 for source, operation in operations.items():
@@ -319,9 +319,11 @@ class Collector:
                     'finished': stamp(), 'status': 'incomplete' if failures else 'complete',
                     'requested_start': self.start.isoformat(), 'requested_end': self.end.isoformat(),
                     'limits': 'Отчёты и документы запрашиваются только за прошедший календарный день по Москве. '
-                              'Баланс, цены, карточки и текущие остатки — снимки. '
+                              'Баланс, цены и текущие остатки — снимки. '
                               'Заказы/продажи — предварительные данные. WB может публиковать данные с задержкой; '
                               'более ранние дни автоматически не перепроверяются. '
+                              'Карточки товаров и отдельные отчёты об издержках на приём платежей, хранении и приёмке исключены. '
+                              'Соответствующие суммы в ежедневной финансовой детализации сохранены. '
                               'Еженедельные отчёты, история остатков CSV, реклама и сборочные задания отключены.',
                     'sources': self.registry}
         atomic_json(self.root / 'РЕЕСТР.json', metadata)

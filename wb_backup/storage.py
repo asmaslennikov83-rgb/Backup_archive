@@ -32,6 +32,15 @@ class Store:
         CREATE TABLE IF NOT EXISTS sent(job INTEGER, chat INTEGER, file TEXT,
             PRIMARY KEY(job, chat, file));
         """)
+        profile = 'yesterday-essential-v1'
+        previous_profile = self.get('collection_profile')
+        if previous_profile != profile:
+            # A retry of a previous profile could otherwise send old unwanted
+            # files already present in its archive directory.
+            self.db.execute("UPDATE jobs SET status='cancelled', progress='Отменено: обновлён состав отчётов' "
+                            "WHERE status IN ('queued','running','incomplete','failed')")
+            self.db.execute("DELETE FROM kv WHERE key='last_scheduled_date'")
+            self.db.execute("INSERT OR REPLACE INTO kv VALUES ('collection_profile',?)", (json.dumps(profile),))
         # Old jobs may span years or a 30-day window. Preserve their archives,
         # but never resume them under the new one-day policy.
         cancelled = self.db.execute("UPDATE jobs SET status='cancelled', progress='Остановлено: включена загрузка только за вчера' "
