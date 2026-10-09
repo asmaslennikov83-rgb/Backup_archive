@@ -1,0 +1,4 @@
+httpx>=0.28,<0.29
+openpyxl>=3.1.5,<3.2
+python-dotenv>=1.0,<2
+tzdata>=2025.2
