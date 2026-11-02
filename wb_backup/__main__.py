@@ -9,6 +9,8 @@ from .collector import Collector
 from .telegram import Telegram, TelegramError
 from .lock import InstanceLock
 from .menu import welcome, CONNECTED_TEXT, HELP_TEXT
+from .maintenance import cleanup, disk_report
+import time
 
 log = logging.getLogger('wb_backup')
 
@@ -41,7 +43,15 @@ class Bot:
                 log.warning('Не удалось отправить сообщение получателю %s', user)
 
     def worker(self):
+        last_cleanup = 0
         while not self.stop.is_set():
+            if time.monotonic() - last_cleanup >= 3600 or not last_cleanup:
+                try:
+                    result = cleanup(self.store)
+                    log.info('Очистка хранилища: %s', result)
+                except Exception as error:
+                    log.warning('Не удалось очистить хранилище: %s', type(error).__name__)
+                last_cleanup = time.monotonic()
             job = self.store.next_job()
             if not job:
                 self.stop.wait(2)
@@ -86,6 +96,8 @@ class Bot:
             self.telegram.message(user, HELP_TEXT, True)
         elif command in ('/connected', 'Что подключено'):
             self.telegram.message(user, CONNECTED_TEXT, True)
+        elif command in ('/storage', 'Место на диске'):
+            self.telegram.message(user, disk_report(self.config.data), True)
         elif command in ('/all', 'Скачать всё'):
             self.telegram.message(user, 'Полная история отключена. Используйте «Скачать за вчера».', True)
         elif command in ('/daily', 'Скачать за вчера', 'Скачать свежие данные'):
@@ -96,7 +108,7 @@ class Bot:
             job = self.store.latest()
             states = {'queued': 'В очереди', 'running': 'Загрузка', 'complete': 'Готово',
                       'incomplete': 'Есть ошибки', 'failed': 'Остановлено из-за ошибки',
-                      'cancelled': 'Отменено: включена загрузка за вчера'}
+                      'cancelled': 'Отменено: включена загрузка за вчера', 'expired': 'Удалено: прошло 14 дней'}
             self.telegram.message(user, 'Загрузок ещё нет.' if not job else
                 f'Загрузка №{job["id"]}\nРежим: {"За прошедший день" if job["mode"] == "yesterday" else "Старая загрузка"}\n'
                 f'Статус: {states.get(job["status"], job["status"])}\nНачало: {job["created"]}\n'

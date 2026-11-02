@@ -146,6 +146,11 @@ class Collector:
             cards = self.cards(internal)
         finally:
             internal.client.close()
+            # Full card payloads are only needed to discover FBS size IDs.
+            # Do not retain a fresh copy of descriptions/photos every day.
+            from .maintenance import remove_tree
+            if internal.cache.exists():
+                remove_tree(internal.cache, self.root.parent)
         ids = sorted({int(size['chrtID']) for card in cards for size in card.get('sizes', []) if 'chrtID' in size})
         warehouses = self.request_table(wb, 'склады_продавца', 'marketplace', 'GET', '/api/v3/warehouses')
         if cards and not ids:
